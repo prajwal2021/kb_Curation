@@ -8,13 +8,13 @@ import secrets
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from . import docgen, servicenow as sn, sn_ai
 from .config import DATA_DIR, PUBLIC_API_BASE, SN_IMPORT_TOKEN, SN_MODEL
 from .db import get_db
-from .diffing import line_diff
+from .diffing import line_diff, word_diff
 from .models import Activity, Chatbot, SnArticle, SnArticleEvent, SnAsset, SnCategory, SnLink, SnLinkEvent, SnVersion, now
 from .users import actor, current_user
 
@@ -40,15 +40,14 @@ def guard(fn, *a, **kw):
 
 def shown(a: SnArticle) -> dict:
     if sn.has_proposal(a):
-        return {"title": a.p_title, "content": a.p_content, "category_id": a.p_category_id if a.p_category_id is not None else a.category_id,
-                "labels": a.p_labels or []}
-    return {"title": a.title, "content": a.content, "category_id": a.category_id, "labels": a.labels or []}
+        return {"title": a.p_title, "content": a.p_content, "category_id": a.p_category_id if a.p_category_id is not None else a.category_id}
+    return {"title": a.title, "content": a.content, "category_id": a.category_id}
 
 
 def article_dict(a: SnArticle, cats: dict[int, SnCategory], full: bool = False) -> dict:
     s = shown(a)
     c = cats.get(s["category_id"])
-    d = {"id": a.id, "status": a.status, **s, "category": c.path if c else None, "number": a.number, "sn_state": a.sn_state,
+    d = {"id": a.id, "status": a.status, "p_stage": a.p_stage, "flags": a.labels or [], **s, "category": c.path if c else None, "number": a.number, "sn_state": a.sn_state,
          "kb_url": sn.kb_url(a.number), "kind": a.p_kind, "reason": a.p_reason, "has_approved": a.content is not None,
          "edited": a.p_edited, "reviewer": a.reviewer, "reviewed_at": a.reviewed_at, "detected_at": a.detected_at,
          "updated_at": a.updated_at, "revision": a.revision, "link_id": a.p_link_id, "event_id": a.p_event_id}
@@ -67,7 +66,7 @@ def cat_map(db: Session, bot_id: int) -> dict[int, SnCategory]:
 @router.get("/api/chatbots/{key}/servicenow/overview")
 def overview(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
     st = dict(db.execute(select(SnArticle.status, func.count()).where(SnArticle.chatbot_id == bot.id).group_by(SnArticle.status)).all())
-    kinds = dict(db.execute(select(SnArticle.p_kind, func.count()).where(SnArticle.chatbot_id == bot.id, SnArticle.status.in_(sn.QUEUE))
+    kinds = dict(db.execute(select(SnArticle.p_kind, func.count()).where(SnArticle.chatbot_id == bot.id, sn.todo_clause())
                             .group_by(SnArticle.p_kind)).all())
     links = dict(db.execute(select(SnLink.status, func.count()).where(SnLink.chatbot_id == bot.id).group_by(SnLink.status)).all())
     imp = db.scalar(select(Activity).where(Activity.chatbot_id == bot.id, Activity.area == "servicenow", Activity.action == "import")
@@ -81,9 +80,9 @@ def overview(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
         "imported": bool(imp), "import": {"at": imp.created_at, "by": imp.actor, **(imp.detail or {}),
                                           "articles": db.scalar(select(func.count()).select_from(SnArticle).where(
                                               SnArticle.chatbot_id == bot.id, SnArticle.sys_id.is_not(None)))} if imp else None,
-        "articles": {s: st.get(s, 0) for s in ("new", "changed", "removal", "approved", "rejected", "removed")},
-        "waiting": sum(st.get(s, 0) for s in sn.QUEUE), "waiting_by_kind": {k or "import": n for k, n in kinds.items()},
-        "live": sum(st.get(s, 0) for s in sn.LIVE), "categories": len(cats),
+        "articles": {s: st.get(s, 0) for s in sn.STATES},
+        "waiting": sum(kinds.values()), "waiting_by_kind": {k or "import": n for k, n in kinds.items()},
+        "live": st.get("published", 0), "categories": len(cats),
         "links": {"total": sum(links.values()), "error": links.get("error", 0), "checking": links.get("checking", 0) + links.get("pending", 0)},
         "published": version_dict(v) if v else None, "unpublished": d["counts"], "unpublished_total": len(d["changes"]),
         "recent": [event_dict(e, l, cats) for e, l in recent], "ai": sn_ai.enabled(), "model": SN_MODEL,
@@ -104,21 +103,21 @@ def link_dict(l: SnLink, cats: dict[int, SnCategory], busy: set[int] | None = No
 def categories(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
     cats = cat_map(db, bot.id)
     counts: dict[int | None, dict] = {}
-    for a in db.scalars(select(SnArticle).where(SnArticle.chatbot_id == bot.id, SnArticle.status.not_in(("rejected", "removed")))):
+    for a in db.scalars(select(SnArticle).where(SnArticle.chatbot_id == bot.id, SnArticle.status != "retired")):
         cid = shown(a)["category_id"]
-        c = counts.setdefault(cid, {"total": 0, "waiting": 0, "approved": 0})
+        c = counts.setdefault(cid, {"total": 0, "waiting": 0, "published": 0})
         c["total"] += 1
-        c["waiting"] += a.status in sn.QUEUE
-        c["approved"] += a.status in sn.LIVE
+        c["waiting"] += sn.in_todo(a)
+        c["published"] += a.status == "published"
     links: dict[int, list] = {}
     busy = sn.busy_links()
     for l in db.scalars(select(SnLink).where(SnLink.chatbot_id == bot.id).order_by(SnLink.id)):
         links.setdefault(l.category_id, []).append(link_dict(l, cats, busy))
     rows = sorted(cats.values(), key=lambda c: c.position)
     return {"categories": [{"id": c.id, "name": c.name, "path": c.path, "parent_id": c.parent_id, "active": c.active,
-                            "depth": c.path.count(" > "), **counts.get(c.id, {"total": 0, "waiting": 0, "approved": 0}),
+                            "depth": c.path.count(" > "), **counts.get(c.id, {"total": 0, "waiting": 0, "published": 0}),
                             "links": links.get(c.id, [])} for c in rows],
-            "uncategorized": counts.get(None, {"total": 0, "waiting": 0, "approved": 0})}
+            "uncategorized": counts.get(None, {"total": 0, "waiting": 0, "published": 0})}
 
 
 class LinkIn(BaseModel):
@@ -175,6 +174,10 @@ def delete_link(lid: int, who: str = Depends(actor), db: Session = Depends(get_d
     l = db.get(SnLink, lid)
     if l:
         sn.record(db, l.chatbot_id, "link_removed", who, f"Removed the link {l.url}")
+        heir = next((x for x in sn.siblings(db, l) if x.id != l.id), None)
+        if heir:                                              # the page is still watched: its history moves, not dies
+            db.execute(update(SnLinkEvent).where(SnLinkEvent.link_id == l.id).values(link_id=heir.id))
+            db.execute(update(SnArticle).where(SnArticle.p_link_id == l.id).values(p_link_id=heir.id))
         db.delete(l)
         db.commit()
     return {"ok": True}
@@ -227,14 +230,14 @@ def event_detail(eid: int, db: Session = Depends(get_db)):
 # ── articles and review ───────────────────────────────────────────────────────
 
 @router.get("/api/chatbots/{key}/servicenow/articles")
-def articles(status: str = "queue", category: int | None = None, sub: bool = True, q: str | None = None, label: str | None = None,
+def articles(status: str = "queue", category: int | None = None, sub: bool = True, q: str | None = None, flag: str | None = None,
              kind: str | None = None, offset: int = 0, limit: int = 200, bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
-    statuses = sn.QUEUE if status == "queue" else tuple(status.split(","))
     cats = cat_map(db, bot.id)
     want = set(sn.descendants(db, category) if sub else [category]) if category else None
     ql = (q or "").lower().strip()
     out, total = [], 0
-    rows = db.scalars(select(SnArticle).where(SnArticle.chatbot_id == bot.id, SnArticle.status.in_(statuses)).order_by(SnArticle.id)).all()
+    which = sn.todo_clause() if status == "queue" else SnArticle.status.in_(status.split(","))
+    rows = db.scalars(select(SnArticle).where(SnArticle.chatbot_id == bot.id, which).order_by(SnArticle.id)).all()
     rows = sorted(rows, key=lambda a: ((cats[shown(a)["category_id"]].position if shown(a)["category_id"] in cats else 99999), a.number or "~", a.id))
     for a in rows:
         s = shown(a)
@@ -242,7 +245,7 @@ def articles(status: str = "queue", category: int | None = None, sub: bool = Tru
             continue
         if want is not None and s["category_id"] not in want:
             continue
-        if label and label not in s["labels"]:
+        if flag and flag not in (a.labels or []):
             continue
         if kind and (a.p_kind or "") != kind:
             continue
@@ -257,14 +260,20 @@ def articles(status: str = "queue", category: int | None = None, sub: bool = Tru
 @router.get("/api/chatbots/{key}/servicenow/review-summary")
 def review_summary(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
     st = dict(db.execute(select(SnArticle.status, func.count()).where(SnArticle.chatbot_id == bot.id).group_by(SnArticle.status)).all())
-    labels: dict[str, int] = {}
+    flags: dict[str, int] = {}
     kinds: dict[str, int] = {}
-    for a in db.scalars(select(SnArticle).where(SnArticle.chatbot_id == bot.id, SnArticle.status.in_(sn.QUEUE))):
-        for l in shown(a)["labels"]:
-            labels[l] = labels.get(l, 0) + 1
-        kinds[a.p_kind or "import"] = kinds.get(a.p_kind or "import", 0) + 1
-    return {"status": {s: st.get(s, 0) for s in ("new", "changed", "removal", "approved", "rejected", "removed")},
-            "labels": sorted(labels.items(), key=lambda x: -x[1]), "kinds": kinds}
+    for a in db.scalars(select(SnArticle).where(SnArticle.chatbot_id == bot.id)):
+        for f in a.labels or []:
+            flags[f] = flags.get(f, 0) + 1
+        if sn.in_todo(a):
+            kinds[a.p_kind or "import"] = kinds.get(a.p_kind or "import", 0) + 1
+    return {"status": {s: st.get(s, 0) for s in sn.STATES}, "todo": sum(kinds.values()),
+            "flags": sorted(flags.items(), key=lambda x: -x[1]), "kinds": kinds}
+
+
+@router.get("/api/chatbots/{key}/servicenow/flags")
+def flags(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
+    return sn.flag_list(db, bot)
 
 
 def _article(db: Session, aid: int) -> SnArticle:
@@ -281,15 +290,31 @@ def _detail(db: Session, a: SnArticle) -> dict:
     d["sn_content"] = a.sn_content
     d["valid_to"], d["template"], d["sn_updated"] = a.valid_to, a.sn_template, a.sn_updated
     d["diff_base"] = None
-    if a.status == "changed":
-        d["diff"], d["added"], d["removed"] = line_diff(f"{a.title}\n{a.content}", f"{a.p_title}\n{a.p_content}", context=3)
-        d["diff_base"] = "approved"
-    elif a.status == "removal":
+    if a.status == "pending_retirement":
         d["diff"], d["added"], d["removed"] = line_diff(f"{a.title}\n{a.content}", "")
         d["diff_base"] = "approved"
-    elif a.status == "new" and a.sn_content is not None and (a.p_content or "") != a.sn_content:
+    elif sn.has_proposal(a) and a.content is not None:      # a pending change on the published text
+        d["diff"], d["added"], d["removed"] = line_diff(f"{a.title}\n{a.content}", f"{a.p_title}\n{a.p_content}", context=3)
+        d["diff_base"] = "approved"
+    elif a.status in ("draft", "review") and a.sn_content is not None and (a.p_content or "") != a.sn_content:
         d["diff"], d["added"], d["removed"] = line_diff(a.sn_content, a.p_content or "", context=3)
         d["diff_base"] = "servicenow"
+    shown_text = a.p_content if sn.has_proposal(a) else a.content
+    d["word_diff"] = None
+    if a.status != "pending_retirement" and d["diff_base"] == "approved":
+        d["word_diff"] = word_diff(a.content or "", a.p_content or "")
+    elif d["diff_base"] == "servicenow":
+        d["word_diff"] = word_diff(a.sn_content or "", a.p_content or "")
+    d["same_as_servicenow"] = shown_text == a.sn_content
+    up, c = set(), cats.get(a.category_id)
+    while c and c.id not in up:            # the article's category and its ancestors
+        up.add(c.id)
+        c = cats.get(c.parent_id)
+    pages = db.scalars(select(SnLink).where(SnLink.chatbot_id == a.chatbot_id, (SnLink.article_id == a.id)
+                                            | (SnLink.article_id.is_(None) & SnLink.category_id.in_(up))).order_by(SnLink.id))
+    d["pages"] = [{"id": l.id, "url": l.url, "title": l.title, "status": l.status} for l in pages]
+    v = db.scalars(select(SnVersion).where(SnVersion.chatbot_id == a.chatbot_id).order_by(SnVersion.number.desc()).limit(1)).first()
+    d["in_release"] = v.number if v and any(i.get("entry_id") == a.id for i in v.items or []) else None
     l = db.get(SnLink, a.p_link_id) if a.p_link_id else None
     d["link"] = {"id": l.id, "url": l.url, "title": l.title} if l else None
     d["history"] = [{"id": h.id, "action": h.action, "actor": h.actor, "detail": h.detail, "created_at": h.created_at}
@@ -306,13 +331,33 @@ class ArticleIn(BaseModel):
     title: str | None = None
     content: str | None = None
     category_id: int | None = None
-    labels: list[str] | None = None
+    flags: list[str] | None = None
 
 
 @router.patch("/api/servicenow/articles/{aid}")
 def edit_article(aid: int, b: ArticleIn, who: str = Depends(actor), db: Session = Depends(get_db)):
     a = _article(db, aid)
-    guard(sn.edit, db, a, who, **b.model_dump())
+    if (b.title, b.content, b.category_id) != (None, None, None):
+        guard(sn.edit, db, a, who, title=b.title, content=b.content, category_id=b.category_id)
+    if b.flags is not None:
+        sn.set_flags(db, a, who, b.flags)
+        sn.record(db, a.chatbot_id, "flags", who, f"Set the flags of “{shown(a)['title']}” to: {', '.join(a.labels) or 'none'}", article_id=a.id)
+    db.commit()
+    return _detail(db, a)
+
+
+class NewArticleIn(BaseModel):
+    title: str
+    content: str
+    category_id: int | None = None
+    flags: list[str] = []
+    review: bool = False
+
+
+@router.post("/api/chatbots/{key}/servicenow/articles")
+def create_article(b: NewArticleIn, bot: Chatbot = Depends(get_bot), who: str = Depends(actor), db: Session = Depends(get_db)):
+    a = guard(sn.create_article, db, bot, who, title=b.title, content=b.content, category_id=b.category_id, flags=b.flags, review=b.review)
+    sn.record(db, bot.id, "created", who, f"Created “{a.p_title}”" + (" and sent it for review" if b.review else " as a draft"), article_id=a.id)
     db.commit()
     return _detail(db, a)
 
@@ -321,20 +366,21 @@ class NoteIn(BaseModel):
     note: str = ""
 
 
+VERBS = {"send_for_review": "Sent for review", "publish": "Published", "send_back": "Sent back to draft", "discard": "Discarded",
+         "suggest_retire": "Suggested retiring", "keep": "Kept published", "retire": "Retired", "restore": "Restored"}
+
+
 @router.post("/api/servicenow/articles/{aid}/{action}")
 def act(aid: int, action: str, b: NoteIn, who: str = Depends(actor), db: Session = Depends(get_db)):
     a = _article(db, aid)
-    was, name = a.status, shown(a)["title"]
-    fn = {"approve": sn.approve, "reject": sn.reject, "reopen": sn.reopen}.get(action)
+    fn = sn.ACTIONS.get(action)
     if not fn:
         raise HTTPException(404)
-    guard(fn, db, a, who, *([b.note] if action == "reject" else []))
-    verb = {"approve": {"removal": "Approved removing", "changed": "Approved the change to"}.get(was, "Approved"),
-            "reject": {"removal": "Kept (rejected the removal of)", "changed": "Rejected the change to"}.get(was, "Rejected"),
-            "reopen": "Reopened"}[action]
-    sn.record(db, a.chatbot_id, action, who, f"{verb} “{name}”", article_id=a.id, **({"note": b.note} if b.note else {}))
+    sn.record(db, a.chatbot_id, action, who, f"{VERBS[action]} “{shown(a)['title']}”", article_id=a.id, **({"note": b.note} if b.note else {}))
+    guard(fn, db, a, who, b.note)                             # an SnError stops before the commit, so the line above is dropped
+    gone = a in db.deleted                                    # discard deletes a new article that was never published
     db.commit()
-    return _detail(db, a)
+    return {"deleted": True} if gone else _detail(db, a)
 
 
 class BulkIn(BaseModel):
@@ -344,9 +390,9 @@ class BulkIn(BaseModel):
 
 @router.post("/api/chatbots/{key}/servicenow/articles/bulk")
 def bulk(b: BulkIn, bot: Chatbot = Depends(get_bot), who: str = Depends(actor), db: Session = Depends(get_db)):
-    if b.action not in ("approve", "reject"):
-        raise HTTPException(400, "The action must be approve or reject.")
-    fn = sn.approve if b.action == "approve" else sn.reject
+    if b.action not in ("publish", "send_back"):
+        raise HTTPException(400, "The action must be publish or send_back.")
+    fn = sn.ACTIONS[b.action]
     done, skipped = 0, []
     for a in db.scalars(select(SnArticle).where(SnArticle.chatbot_id == bot.id, SnArticle.id.in_(b.ids[:1000]))):
         try:
@@ -355,7 +401,8 @@ def bulk(b: BulkIn, bot: Chatbot = Depends(get_bot), who: str = Depends(actor), 
         except sn.SnError as e:
             skipped.append({"id": a.id, "reason": str(e)})
     if done:
-        sn.record(db, bot.id, "bulk_" + b.action, who, f"{'Approved' if b.action == 'approve' else 'Rejected'} {done} articles in one go", skipped=len(skipped))
+        sn.record(db, bot.id, "bulk_" + b.action, who, f"{'Published' if b.action == 'publish' else 'Sent back to draft'} {done} articles in one go",
+                  skipped=len(skipped))
     db.commit()
     return {"done": done, "skipped": skipped}
 

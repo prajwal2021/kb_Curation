@@ -90,7 +90,7 @@ function EventDetail({ id, bot }: { id: number; bot: string }) {
                   <Badge tone={A.tone}>{A.label}</Badge>
                   <div className="min-w-0 flex-1 text-[13px]">
                     {d.article_id && d.result === "proposed"
-                      ? <Link href={`/${bot}/servicenow/review?article=${d.article_id}`} className="font-medium hover:underline">{d.title}</Link>
+                      ? <Link href={`/${bot}/servicenow/article/${d.article_id}`} className="font-medium hover:underline">{d.title}</Link>
                       : <p className="font-medium">{d.title}</p>}
                     {d.reason && <p className="mt-0.5 text-muted">{d.reason}</p>}
                     {d.result && d.result !== "proposed" && d.action !== "none" && <p className="mt-0.5 text-xs text-amber-700">Not applied: {d.result}</p>}

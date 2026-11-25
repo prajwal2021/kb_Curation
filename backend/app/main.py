@@ -85,6 +85,9 @@ async def lifespan(_: FastAPI):
         con.exec_driver_sql("ALTER TABLE entries ADD COLUMN IF NOT EXISTS scope_score DOUBLE PRECISION")
         con.exec_driver_sql("ALTER TABLE entries ADD COLUMN IF NOT EXISTS in_scope BOOLEAN")
         con.exec_driver_sql("ALTER TABLE entries ADD COLUMN IF NOT EXISTS scope_verdict BOOLEAN")
+        con.exec_driver_sql("ALTER TABLE sn_articles ALTER COLUMN status TYPE VARCHAR(20)")
+        con.exec_driver_sql("ALTER TABLE sn_articles ADD COLUMN IF NOT EXISTS p_stage VARCHAR(10)")
+        con.exec_driver_sql("ALTER TABLE sn_articles ADD COLUMN IF NOT EXISTS app_changed BOOLEAN DEFAULT false")
     seed()
     # Previous architecture, hidden for now: the website crawler and its schedule (it can call OpenAI on every run).
     # pipeline.start_background()
@@ -233,7 +236,7 @@ def chatbots(db: Session = Depends(get_db)):
     out = []
     for b in db.scalars(select(Chatbot).order_by(Chatbot.id)):
         waiting = db.scalar(select(func.count()).select_from(Entry).where(Entry.chatbot_id == b.id, Entry.status.in_(QUEUE)))
-        sn_waiting = db.scalar(select(func.count()).select_from(SnArticle).where(SnArticle.chatbot_id == b.id, SnArticle.status.in_(QUEUE)))
+        sn_waiting = db.scalar(select(func.count()).select_from(SnArticle).where(SnArticle.chatbot_id == b.id, servicenow.todo_clause()))
         out.append({"key": b.key, "name": b.name, "description": b.description, "waiting": waiting, "sn_waiting": sn_waiting})
     return out
 
@@ -451,13 +454,17 @@ def pages_bulk(b: PagesIn, bot: Chatbot = Depends(get_bot), who: str = Depends(a
 
 
 @api.get("/api/chatbots/{key}/activity")
-def activity(area: str | None = None, limit: int = 200, bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
+def activity(area: str | None = None, actions: str | None = None, limit: int = 200, bot: Chatbot = Depends(get_bot),
+             db: Session = Depends(get_db)):
     q = select(Activity).where(Activity.chatbot_id == bot.id)
     if area:
         q = q.where(Activity.area == area)
+    if actions:
+        q = q.where(Activity.action.in_(actions.split(",")))
     rows = db.scalars(q.order_by(Activity.id.desc()).limit(min(limit, 1000))).all()
     counts = dict(db.execute(select(Activity.area, func.count()).where(Activity.chatbot_id == bot.id).group_by(Activity.area)).all())
-    return {"counts": counts, "items": [{"id": a.id, "area": a.area, "action": a.action, "actor": a.actor, "summary": a.summary,
+    by_action = dict(db.execute(select(Activity.action, func.count()).where(Activity.chatbot_id == bot.id).group_by(Activity.action)).all())
+    return {"counts": counts, "actions": by_action, "items": [{"id": a.id, "area": a.area, "action": a.action, "actor": a.actor, "summary": a.summary,
                                          "detail": a.detail, "created_at": a.created_at} for a in rows]}
 
 

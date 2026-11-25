@@ -80,7 +80,7 @@ function CategorySettings() {
 
   return (
     <Page>
-      <PageHeader title="Settings" description="Categories decide how content is grouped in the review queue, the knowledge base and the document. New content is filed automatically; reviewers can always move an entry." actions={<><Button busy={busy} onClick={refile}>{!busy && <Sparkles className="size-4" />} Re-file waiting entries with AI</Button><Button variant="primary" onClick={() => setEdit({ name: "", description: "", keywords: [], color: "blue" })}><Plus className="size-4" /> New category</Button></>} />
+      <PageHeader title="Settings" description="Categories group content for review and the knowledge base." actions={<><Button busy={busy} onClick={refile}>{!busy && <Sparkles className="size-4" />} Re-file waiting entries with AI</Button><Button variant="primary" onClick={() => setEdit({ name: "", description: "", keywords: [], color: "blue" })}><Plus className="size-4" /> New category</Button></>} />
       {data && <p className="-mt-2 mb-4 text-[13px] text-muted">{data.ai ? "AI filing is on: new content is filed by an AI model using each category's description. Keywords are the fallback." : "AI filing is off: new content is filed by keywords only."}</p>}
       {error && <ErrorNote>{error}</ErrorNote>}
       {!data ? <Loading /> : (

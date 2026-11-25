@@ -1,11 +1,5 @@
-"""ServiceNow curation tests.
-
-Converter tests need nothing. The flow tests need a throwaway Postgres database: set SN_TEST_DATABASE_URL
-(e.g. postgresql+psycopg://localhost:5432/kb_curation_sntest); they are skipped otherwise. The AI is stubbed.
-"""
+"""ServiceNow converter and AI-edit tests: no database needed. The flow tests are in test_sn_flow.py."""
 from __future__ import annotations
-
-import os
 
 import pytest
 
@@ -52,113 +46,6 @@ def test_template_parts_are_merged_and_faq_question_not_repeated():
     assert article_content(empty, BASE) == "From text"
 
 
-# ── flow tests against a real database ──────────────────────────────────────
-
-DB = os.getenv("SN_TEST_DATABASE_URL")
-pytestmark_db = pytest.mark.skipif(not DB, reason="set SN_TEST_DATABASE_URL to run database tests")
-
-
-@pytest.fixture()
-def env(monkeypatch):
-    os.environ["DATABASE_URL"] = DB
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    from app import db as dbmod, servicenow as sn
-    from app.db import Base
-    from app.models import Chatbot
-
-    eng = create_engine(DB)
-    Base.metadata.drop_all(eng)
-    Base.metadata.create_all(eng)
-    S = sessionmaker(eng, expire_on_commit=False)
-    monkeypatch.setattr(dbmod, "SessionLocal", S)
-    monkeypatch.setattr(sn, "SessionLocal", S)
-    s = S()
-    bot = Chatbot(key="k12", name="TTU K-12", description="")
-    s.add(bot)
-    s.commit()
-    yield s, bot, sn
-    s.close()
-    Base.metadata.drop_all(eng)
-
-
-KB = {"categories": [{"sys_id": "a" * 32, "label": "Financial Questions", "parent": None, "active": True},
-                     {"sys_id": "b" * 32, "label": "Refunds", "parent": "a" * 32, "active": True}],
-      "articles": [{"sys_id": "1" * 32, "number": "KB1", "title": "Refund policy", "state": "published", "category": "b" * 32,
-                    "template": "kb_template_how_to", "valid_to": "2020-01-01",
-                    "parts": [["kb_introduction", "<p>Refunds take 10 days.</p>"], ["kb_instructions", "<p>The fee is $40.</p>"]], "text": ""},
-                   {"sys_id": "2" * 32, "number": "KB2", "title": "Agent notes INTERNAL", "state": "draft", "category": "a" * 32,
-                    "template": "kb_template_what_is", "valid_to": "2100-01-01", "parts": [["kb_explanation", "<p>Escalate.</p>"]], "text": ""}]}
-
-
-@pytestmark_db
-def test_import_review_link_ai_publish(env, monkeypatch):
-    s, bot, sn = env
-    from app.models import SnArticle, SnCategory, SnLink, SnLinkEvent
-
-    st = sn.import_kb(s, bot, KB, "tester")
-    assert st["articles_new"] == 2 and st["categories"] == 2
-    refunds = s.query(SnCategory).filter_by(name="Refunds").one()
-    assert refunds.path == "Financial Questions > Refunds"
-    a1 = s.query(SnArticle).filter_by(number="KB1").one()
-    a2 = s.query(SnArticle).filter_by(number="KB2").one()
-    assert a1.p_content == "Refunds take 10 days.\nThe fee is $40." and "Expired in ServiceNow" in a1.p_labels
-    assert "Draft in ServiceNow" in a2.p_labels and "Internal only" in a2.p_labels
-
-    # re-import refreshes untouched articles only
-    sn.approve(s, a1, "tester")
-    s.commit()
-    st = sn.import_kb(s, bot, KB, "tester")
-    assert st["articles_kept"] == 1 and st["articles_refreshed"] == 1
-    assert a1.status == "approved" and a1.content == "Refunds take 10 days.\nThe fee is $40."
-
-    # a link on the parent category covers the child category's articles
-    pages = iter([{"title": "Refunds", "text": "## Refunds\nThe fee is $40.", "hash": "h1", "final": "u"},
-                  {"title": "Refunds", "text": "## Refunds\nThe fee is $50.", "hash": "h2", "final": "u"}])
-    monkeypatch.setattr(sn, "_fetch", lambda url: next(pages))
-    monkeypatch.setattr(sn, "enqueue", lambda *a, **k: True)
-    parent = s.query(SnCategory).filter_by(name="Financial Questions").one()
-    link = sn.add_link(s, bot, parent.id, "https://www.depts.ttu.edu/k12/refunds/", "tester")
-    sn.check_link(link.id)                                   # first read = baseline, no AI
-    s.expire_all()
-    assert s.get(SnLink, link.id).content_hash == "h1"
-    seen = {}
-
-    def fake(category, url, diff, page_text, articles, audit=False):
-        seen["ids"] = sorted(a["id"] for a in articles)
-        seen["diff"] = [d for d in diff if d["t"] in "+-"]
-        return [{"action": "update", "article_id": a1.id, "title": "Refund policy", "content": "Refunds take 10 days.\nThe fee is $50.", "reason": "Fee is now $50."},
-                {"action": "none", "article_id": a2.id, "title": "x", "content": "", "reason": "unrelated"},
-                {"action": "new", "title": "Refund timeline", "content": "Refunds post in 10 days.", "reason": "New topic"}]
-    monkeypatch.setattr(sn.sn_ai, "reconcile", fake)
-    sn.check_link(link.id)
-    s.expire_all()
-    assert seen["ids"] == sorted([a1.id, a2.id])
-    assert {"t": "+", "s": "The fee is $50."} in seen["diff"]
-    a1 = s.get(SnArticle, a1.id)
-    assert a1.status == "changed" and a1.p_content.endswith("$50.") and a1.content.endswith("$40.") and "AI update" in a1.p_labels
-    new = s.query(SnArticle).filter_by(p_kind="new").one()
-    assert new.status == "new" and new.category_id == parent.id
-    ev = s.query(SnLinkEvent).filter_by(kind="changed").one()
-    assert [d["result"] for d in ev.decisions] == ["proposed", "no change", "proposed"]
-
-    # publish: only approved knowledge goes out; the pending change does not
-    v = sn.publish_version(s, bot, "first", "tester")
-    assert v.stats["total"] == 1 and v.items[0]["content"].endswith("$40.")
-    sn.approve(s, a1, "tester")
-    s.commit()
-    d = sn.draft(s, bot)
-    assert d["counts"]["modified"] == 1
-
-    # bulk reject of the AI-proposed article, and removal flow
-    sn.reject(s, new, "tester")
-    assert new.status == "rejected"
-    a1.status, a1.p_kind = "removal", "remove"
-    sn.reject(s, a1, "tester")
-    assert a1.status == "approved"
-
-
 def test_ai_edits_apply_exactly_or_fail():
     from app.sn_ai import AIError, apply_edits
 
@@ -173,84 +60,89 @@ def test_ai_edits_apply_exactly_or_fail():
         apply_edits("a\na", [{"find": "a", "replace": "b"}])
 
 
-@pytestmark_db
-def test_versions_collapse_to_one_article_per_number(env):
-    s, bot, sn = env
-    from app.models import SnArticle
-
-    cat = {"sys_id": "c" * 32, "label": "Fees", "parent": None, "active": True}
-    def art(sys, state, updated, text):
-        return {"sys_id": sys, "number": "KB9", "title": "Fees", "state": state, "category": "c" * 32, "template": "kb_template_what_is",
-                "valid_to": "2100-01-01", "updated": updated, "parts": [["kb_explanation", f"<p>{text}</p>"]], "text": ""}
-
-    # one import batch holding the published version and a newer one in review: one article, published text, flagged
-    st = sn.import_kb(s, bot, {"categories": [cat], "articles": [art("1" * 32, "review", "2025-02-01", "Fee is $50."),
-                                                                art("2" * 32, "published", "2025-01-01", "Fee is $40.")]}, "t")
-    rows = s.query(SnArticle).filter_by(number="KB9").all()
-    assert len(rows) == 1 and st["versions_skipped"] == 1
-    assert rows[0].sys_id == "2" * 32 and rows[0].p_content == "Fee is $40." and sn.NEWER in rows[0].p_labels
-
-    # re-import never brings the other version back
-    sn.import_kb(s, bot, {"categories": [cat], "articles": [art("1" * 32, "review", "2025-02-01", "Fee is $50.")]}, "t")
-    assert s.query(SnArticle).filter_by(number="KB9").count() == 1
-
-    # data imported before this fix: two approved rows; merging keeps the published one and proposes the newer text
-    a1 = rows[0]
-    sn.approve(s, a1, "t")
-    dup = SnArticle(chatbot_id=bot.id, sys_id="3" * 32, number="KB9", sn_state="review", sn_updated="2025-03-01",
-                    status="approved", title="Fees", content="Fee is $55.", category_id=a1.category_id)
-    same = SnArticle(chatbot_id=bot.id, sys_id="4" * 32, number="KB8", sn_state="published", sn_updated="2025-01-01",
-                     status="approved", title="X", content="Same.")
-    same2 = SnArticle(chatbot_id=bot.id, sys_id="5" * 32, number="KB8", sn_state="draft", sn_updated="2025-02-01",
-                      status="approved", title="X", content="Same.")
-    s.add_all([dup, same, same2])
-    s.commit()
-    r = sn.merge_versions(s, bot, "t")
-    assert r == {"numbers": 2, "removed": 2, "proposals": 1}
-    kept = s.query(SnArticle).filter_by(number="KB9").one()
-    assert kept.id == a1.id and kept.status == "changed" and kept.content == "Fee is $40." and kept.p_content == "Fee is $55."
-    assert s.query(SnArticle).filter_by(number="KB8").one().sys_id == "4" * 32
-    sn.approve(s, kept, "t")
-    assert kept.content == "Fee is $55." and sn.NEWER not in kept.labels
-    assert sn.merge_versions(s, bot, "t") == {"numbers": 0, "removed": 0, "proposals": 0}
-
-
-@pytestmark_db
-def test_every_published_item_gets_consistent_status_labels(env):
-    s, bot, sn = env
-    from app.models import SnArticle
-
-    sn.import_kb(s, bot, KB, "t")
-    a = s.query(SnArticle).filter_by(number="KB2").one()        # a draft in ServiceNow, flagged "Internal only"
-    assert "Draft in ServiceNow" in a.p_labels                   # the reviewer sees where it stood in ServiceNow
-    sn.approve(s, a, "Jane")
-    assert "Draft in ServiceNow" not in a.labels                 # not stored: worked out again at publish time
-
-    old = s.query(SnArticle).filter_by(number="KB1").one()        # published in ServiceNow, expired, approved long ago
-    sn.approve(s, old, "Jane")
-    old.labels = ["In review in ServiceNow", "Fees"]             # a stale flag left over from before
-    s.commit()
-    items = {i["number"]: i for i in sn.live_items(s, bot)}
-    assert items["KB1"]["labels"] == ["Fees", "Published in ServiceNow", "Expired in ServiceNow", "Reviewed in KB Curation"]
-    assert items["KB2"]["labels"] == ["Draft in ServiceNow", "Internal only", "Reviewed in KB Curation"]
-    assert items["KB2"]["meta"]["servicenow_state"] == "draft" and items["KB2"]["meta"]["reviewed_by"] == "Jane"
-    assert sn.clear_review_flags(s, bot, "t") == 1 and old.labels == ["Fees"]
-
-
-@pytestmark_db
-def test_everything_export_includes_unreviewed_articles_labelled(env):
-    s, bot, sn = env
-    from app.models import SnArticle
-
-    sn.import_kb(s, bot, KB, "t")
-    sn.approve(s, s.query(SnArticle).filter_by(number="KB1").one(), "Jane")
-    rej = s.query(SnArticle).filter_by(number="KB2").one()
-    s.commit()
-    every = {i["number"]: i for i in sn.everything_items(s, bot)}
-    assert every["KB1"]["meta"]["reviewed_in_kb_curation"] and "Reviewed in KB Curation" in every["KB1"]["labels"]
-    assert not every["KB2"]["meta"]["reviewed_in_kb_curation"] and "Not reviewed in KB Curation" in every["KB2"]["labels"]
-    assert every["KB2"]["content"] == "Escalate."
-    sn.reject(s, rej, "Jane")
-    s.commit()
-    assert "KB2" not in {i["number"] for i in sn.everything_items(s, bot)}
-    assert [i["number"] for i in sn.live_items(s, bot)] == ["KB1"]
+# Previous architecture (upstream's new/changed/approved lifecycle). Replaced on this branch by test_sn_flow.py:
+# test_import_groups_versions_by_number, test_import_merges_duplicate_rows_keeping_links_and_events,
+# test_merge_keeps_newest_person_edit_and_logs_the_other, test_release_labels_and_contents and
+# test_everything_export_labels_each_stage. Kept for reference; not run.
+#
+# @pytestmark_db
+# def test_versions_collapse_to_one_article_per_number(env):
+#     s, bot, sn = env
+#     from app.models import SnArticle
+#
+#     cat = {"sys_id": "c" * 32, "label": "Fees", "parent": None, "active": True}
+#     def art(sys, state, updated, text):
+#         return {"sys_id": sys, "number": "KB9", "title": "Fees", "state": state, "category": "c" * 32, "template": "kb_template_what_is",
+#                 "valid_to": "2100-01-01", "updated": updated, "parts": [["kb_explanation", f"<p>{text}</p>"]], "text": ""}
+#
+#     # one import batch holding the published version and a newer one in review: one article, published text, flagged
+#     st = sn.import_kb(s, bot, {"categories": [cat], "articles": [art("1" * 32, "review", "2025-02-01", "Fee is $50."),
+#                                                                 art("2" * 32, "published", "2025-01-01", "Fee is $40.")]}, "t")
+#     rows = s.query(SnArticle).filter_by(number="KB9").all()
+#     assert len(rows) == 1 and st["versions_skipped"] == 1
+#     assert rows[0].sys_id == "2" * 32 and rows[0].p_content == "Fee is $40." and sn.NEWER in rows[0].p_labels
+#
+#     # re-import never brings the other version back
+#     sn.import_kb(s, bot, {"categories": [cat], "articles": [art("1" * 32, "review", "2025-02-01", "Fee is $50.")]}, "t")
+#     assert s.query(SnArticle).filter_by(number="KB9").count() == 1
+#
+#     # data imported before this fix: two approved rows; merging keeps the published one and proposes the newer text
+#     a1 = rows[0]
+#     sn.approve(s, a1, "t")
+#     dup = SnArticle(chatbot_id=bot.id, sys_id="3" * 32, number="KB9", sn_state="review", sn_updated="2025-03-01",
+#                     status="approved", title="Fees", content="Fee is $55.", category_id=a1.category_id)
+#     same = SnArticle(chatbot_id=bot.id, sys_id="4" * 32, number="KB8", sn_state="published", sn_updated="2025-01-01",
+#                      status="approved", title="X", content="Same.")
+#     same2 = SnArticle(chatbot_id=bot.id, sys_id="5" * 32, number="KB8", sn_state="draft", sn_updated="2025-02-01",
+#                       status="approved", title="X", content="Same.")
+#     s.add_all([dup, same, same2])
+#     s.commit()
+#     r = sn.merge_versions(s, bot, "t")
+#     assert r == {"numbers": 2, "removed": 2, "proposals": 1}
+#     kept = s.query(SnArticle).filter_by(number="KB9").one()
+#     assert kept.id == a1.id and kept.status == "changed" and kept.content == "Fee is $40." and kept.p_content == "Fee is $55."
+#     assert s.query(SnArticle).filter_by(number="KB8").one().sys_id == "4" * 32
+#     sn.approve(s, kept, "t")
+#     assert kept.content == "Fee is $55." and sn.NEWER not in kept.labels
+#     assert sn.merge_versions(s, bot, "t") == {"numbers": 0, "removed": 0, "proposals": 0}
+#
+#
+# @pytestmark_db
+# def test_every_published_item_gets_consistent_status_labels(env):
+#     s, bot, sn = env
+#     from app.models import SnArticle
+#
+#     sn.import_kb(s, bot, KB, "t")
+#     a = s.query(SnArticle).filter_by(number="KB2").one()        # a draft in ServiceNow, flagged "Internal only"
+#     assert "Draft in ServiceNow" in a.p_labels                   # the reviewer sees where it stood in ServiceNow
+#     sn.approve(s, a, "Jane")
+#     assert "Draft in ServiceNow" not in a.labels                 # not stored: worked out again at publish time
+#
+#     old = s.query(SnArticle).filter_by(number="KB1").one()        # published in ServiceNow, expired, approved long ago
+#     sn.approve(s, old, "Jane")
+#     old.labels = ["In review in ServiceNow", "Fees"]             # a stale flag left over from before
+#     s.commit()
+#     items = {i["number"]: i for i in sn.live_items(s, bot)}
+#     assert items["KB1"]["labels"] == ["Fees", "Published in ServiceNow", "Expired in ServiceNow", "Reviewed in KB Curation"]
+#     assert items["KB2"]["labels"] == ["Draft in ServiceNow", "Internal only", "Reviewed in KB Curation"]
+#     assert items["KB2"]["meta"]["servicenow_state"] == "draft" and items["KB2"]["meta"]["reviewed_by"] == "Jane"
+#     assert sn.clear_review_flags(s, bot, "t") == 1 and old.labels == ["Fees"]
+#
+#
+# @pytestmark_db
+# def test_everything_export_includes_unreviewed_articles_labelled(env):
+#     s, bot, sn = env
+#     from app.models import SnArticle
+#
+#     sn.import_kb(s, bot, KB, "t")
+#     sn.approve(s, s.query(SnArticle).filter_by(number="KB1").one(), "Jane")
+#     rej = s.query(SnArticle).filter_by(number="KB2").one()
+#     s.commit()
+#     every = {i["number"]: i for i in sn.everything_items(s, bot)}
+#     assert every["KB1"]["meta"]["reviewed_in_kb_curation"] and "Reviewed in KB Curation" in every["KB1"]["labels"]
+#     assert not every["KB2"]["meta"]["reviewed_in_kb_curation"] and "Not reviewed in KB Curation" in every["KB2"]["labels"]
+#     assert every["KB2"]["content"] == "Escalate."
+#     sn.reject(s, rej, "Jane")
+#     s.commit()
+#     assert "KB2" not in {i["number"] for i in sn.everything_items(s, bot)}
+#     assert [i["number"] for i in sn.live_items(s, bot)] == ["KB1"]

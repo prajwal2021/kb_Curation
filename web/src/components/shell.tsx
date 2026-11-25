@@ -1,5 +1,5 @@
 "use client";
-import { BookOpenCheck, Check, ChevronsUpDown, FileText, FolderTree, GitCompareArrows, Globe, History, LayoutDashboard, Library, ListChecks, LogOut, Plus, Target, Rocket, Settings, UserRound, Files } from "lucide-react";
+import { BookOpenCheck, Check, ChevronDown, ChevronsUpDown, Globe, History, Info, ListChecks, LogOut, Plus, Settings, UserRound } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -28,15 +28,12 @@ const NAV: { group?: string; items: { href: string; label: string; icon: typeof 
     { href: "/document", label: "Document", icon: FileText },
   ] },
   */
-  { group: "ServiceNow", items: [
-    { href: "/servicenow", label: "Overview", icon: Library, exact: true },
-    { href: "/servicenow/categories", label: "Categories & links", icon: FolderTree },
-    { href: "/servicenow/changes", label: "Changes", icon: GitCompareArrows },
-    { href: "/servicenow/review", label: "Review", icon: ListChecks, badge: "sn" },
-    { href: "/servicenow/publish", label: "Publish", icon: Rocket },
+  { items: [
+    { href: "/servicenow", label: "To do", icon: ListChecks, badge: "sn", exact: true },
     { href: "/servicenow/kb", label: "Knowledge base", icon: BookOpenCheck },
+    { href: "/servicenow/web-pages", label: "Web pages", icon: Globe },
+    { href: "/history", label: "History", icon: History },
   ] },
-  { group: "Audit", items: [{ href: "/history", label: "History", icon: History }] },
 ];
 
 export function useBot(): string {
@@ -51,6 +48,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const { data: bots, reload } = useApi<Bot[]>("/api/chatbots", 8000);
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [meOpen, setMeOpen] = useState(false);
+  const meMenu = useRef<HTMLDivElement>(null);
   const { data: me } = useApi<{ name: string }>("/api/me");
   const menu = useRef<HTMLDivElement>(null);
   const current = bots?.find((b) => b.key === bot);
@@ -60,7 +59,10 @@ export function Shell({ children }: { children: ReactNode }) {
     router.replace("/login");
   };
   useEffect(() => {
-    const h = (e: MouseEvent) => menu.current && !menu.current.contains(e.target as Node) && setOpen(false);
+    const h = (e: MouseEvent) => {
+      if (menu.current && !menu.current.contains(e.target as Node)) setOpen(false);
+      if (meMenu.current && !meMenu.current.contains(e.target as Node)) setMeOpen(false);
+    };
     window.addEventListener("mousedown", h);
     return () => window.removeEventListener("mousedown", h);
   }, []);
@@ -119,15 +121,26 @@ export function Shell({ children }: { children: ReactNode }) {
           ))}
         </nav>
 
-        <div className="border-t border-line p-3">
-          <Link href={`/${bot}/settings`} className={cn("mb-0.5 flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium", path.endsWith("/settings") ? "bg-neutral-200/70" : "text-neutral-600 hover:bg-neutral-200/40")}>
-            <Settings className="size-4" strokeWidth={1.8} /> Settings
-          </Link>
-          <div className="flex h-9 items-center gap-2.5 px-2.5 text-[13px]">
+        <Link href={`/${bot}/servicenow/how-it-works`} className={cn("mx-3 mb-2 flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium", path.endsWith("/how-it-works") ? "bg-neutral-200/70 text-ink" : "text-neutral-500 hover:bg-neutral-200/40 hover:text-ink")}>
+          <Info className="size-4" strokeWidth={1.8} /> How it works
+        </Link>
+
+        <div className="relative border-t border-line p-3" ref={meMenu}>
+          {meOpen && (
+            <div className="rise absolute bottom-full left-3 right-3 z-30 mb-1 rounded-xl border border-line bg-white p-1 shadow-lg">
+              <Link href={`/${bot}/settings`} onClick={() => setMeOpen(false)} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] hover:bg-neutral-100">
+                <Settings className="size-3.5" /> Settings
+              </Link>
+              <button onClick={logout} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] hover:bg-neutral-100">
+                <LogOut className="size-3.5" /> Log out
+              </button>
+            </div>
+          )}
+          <button onClick={() => setMeOpen((o) => !o)} aria-expanded={meOpen} className={cn("flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] hover:bg-neutral-200/40", path.endsWith("/settings") && "bg-neutral-200/70")}>
             <span className="flex size-6 items-center justify-center rounded-full bg-neutral-200 text-neutral-600"><UserRound className="size-3.5" /></span>
             <span className="min-w-0 flex-1 truncate font-medium">{me?.name}</span>
-            <button onClick={logout} title="Log out" aria-label="Log out" className="rounded-md p-1 text-neutral-500 hover:bg-neutral-200/60 hover:text-neutral-800"><LogOut className="size-4" /></button>
-          </div>
+            <ChevronDown className="size-3.5 text-neutral-400" />
+          </button>
         </div>
       </aside>
 

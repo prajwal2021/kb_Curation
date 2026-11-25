@@ -3,6 +3,7 @@ import { Loader2, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn, DOT } from "@/lib/utils";
 import type { Category, EntryStatus } from "@/lib/api";
+import { SN_STATE, type SnState } from "@/lib/sn";
 
 // ── Button ───────────────────────────────────────────────────────────────────
 type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "secondary" | "ghost" | "danger"; size?: "sm" | "md"; busy?: boolean };
@@ -56,6 +57,7 @@ export const STATUS: Record<EntryStatus, { label: string; tone: Tone }> = {
   removed: { label: "Removed", tone: "neutral" },
 };
 export const StatusBadge = ({ status }: { status: EntryStatus }) => <Badge tone={STATUS[status].tone} dot>{STATUS[status].label}</Badge>;
+export const SnStateBadge = ({ status }: { status: SnState }) => <Badge tone={SN_STATE[status].tone} dot>{SN_STATE[status].label}</Badge>;
 
 export const KIND: Record<string, { label: string; tone: Tone }> = {
   new: { label: "New page", tone: "blue" },

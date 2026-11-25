@@ -271,7 +271,8 @@ class SnCategory(Base):
 
 
 class SnArticle(Base):
-    """One knowledge article. Statuses and proposal fields work like Entry: approved text vs p_* proposal."""
+    """One knowledge article (one KB number). status is its ServiceNow-style state; title/content is the published text.
+    p_* holds the text of a draft or review article, or a pending change (p_stage) on a published one."""
     __tablename__ = "sn_articles"
     id: Mapped[int] = mapped_column(primary_key=True)
     chatbot_id: Mapped[int] = mapped_column(ForeignKey("chatbots.id", ondelete="CASCADE"), index=True)
@@ -284,7 +285,7 @@ class SnArticle(Base):
     sn_updated: Mapped[str | None] = mapped_column(String(30))
     source_html: Mapped[str | None] = mapped_column(Text)            # the article as imported, for reference
     sn_content: Mapped[str | None] = mapped_column(Text)             # the imported text, before anyone changed it
-    status: Mapped[str] = mapped_column(String(10), default="new", index=True)   # new|changed|removal|approved|rejected|removed
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)   # draft|review|published|pending_retirement|retired
     title: Mapped[str | None] = mapped_column(Text)                  # approved
     content: Mapped[str | None] = mapped_column(Text)
     labels: Mapped[list] = mapped_column(JSONB, default=list)
@@ -297,6 +298,8 @@ class SnArticle(Base):
     p_link_id: Mapped[int | None] = mapped_column(Integer)
     p_event_id: Mapped[int | None] = mapped_column(Integer)
     p_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    p_stage: Mapped[str | None] = mapped_column(String(10))         # draft|review: stage of a pending change on a published article
+    app_changed: Mapped[bool] = mapped_column(Boolean, default=False)   # a person changed text, flags or state in the app since it came from ServiceNow
     reviewer: Mapped[str | None] = mapped_column(String(80))
     reviewed_at: Mapped[datetime | None] = mapped_column(TS)
     revision: Mapped[int] = mapped_column(Integer, default=0)

@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { api, useApi } from "@/lib/api";
 import type { SnArticle, SnCategory, SnLink } from "@/lib/sn";
 import { useBot } from "@/components/shell";
-import { Badge, Button, Card, Drawer, Empty, ErrorNote, inputCls, Label, Loading, Modal, Page, PageHeader, Tabs, useToast } from "@/components/ui";
+import { Badge, Button, Card, Drawer, Empty, ErrorNote, inputCls, Label, Loading, Modal, Page, PageHeader, Tabs, useToast, SnStateBadge } from "@/components/ui";
 import { ago, cn, dateTime, plural, shortUrl } from "@/lib/utils";
 
 type Cats = { categories: SnCategory[]; uncategorized: { total: number; waiting: number } };
@@ -90,7 +90,7 @@ export default function SnCategoriesPage() {
               <span className={cn("min-w-0 flex-1 truncate text-[13px]", c.total ? "font-medium" : "text-muted")}>{c.name}{!c.active && <span className="ml-2 text-xs text-muted">(inactive in ServiceNow)</span>}</span>
               <CoverageChip c={c} cover={cover.get(c.id)} />
               <span className="w-28 shrink-0 text-right text-xs tabular-nums text-muted">{c.total ? plural(c.total, "article") : "—"}</span>
-              <span className="w-20 shrink-0 text-right">{c.waiting > 0 && <Badge tone="blue">{c.waiting} waiting</Badge>}</span>
+              <span className="w-20 shrink-0 text-right">{c.waiting > 0 && <Badge tone="blue">{c.waiting} to do</Badge>}</span>
               <ChevronRight className="size-4 shrink-0 text-neutral-300" />
             </button>
           ))}
@@ -173,7 +173,7 @@ function LinkTable({ links, onOpen }: { links: SnLink[]; onOpen: (categoryId: nu
 
 function CategoryDrawer({ bot, cat, inherited, onClose, onChanged }: { bot: string; cat: SnCategory; inherited?: Cover; onClose: () => void; onChanged: () => void }) {
   const toast = useToast();
-  const arts = useApi<{ total: number; articles: SnArticle[] }>(`/api/chatbots/${bot}/servicenow/articles?status=new,changed,removal,approved&category=${cat.id}&limit=500`);
+  const arts = useApi<{ total: number; articles: SnArticle[] }>(`/api/chatbots/${bot}/servicenow/articles?status=draft,review,published,pending_retirement&category=${cat.id}&limit=500`);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState<number | null>(null);
   const [confirmDel, setConfirmDel] = useState<SnLink | null>(null);
@@ -256,11 +256,11 @@ function CategoryDrawer({ bot, cat, inherited, onClose, onChanged }: { bot: stri
       {!arts.data ? <Loading /> : arts.data.articles.length === 0 ? <p className="text-[13px] text-muted">No articles in this category.</p> : (
         <div className="divide-y divide-line rounded-xl border border-line">
           {arts.data.articles.map((a) => (
-            <Link key={a.id} href={`/${bot}/servicenow/review?article=${a.id}&status=${a.status === "approved" ? "approved" : "queue"}`} className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-subtle">
+            <Link key={a.id} href={`/${bot}/servicenow/article/${a.id}`} className="flex items-center gap-3 px-3.5 py-2.5 hover:bg-subtle">
               <span className="w-20 shrink-0 font-mono text-[11px] text-muted">{a.number ?? "new"}</span>
               <span className="min-w-0 flex-1 truncate text-[13px]">{a.title}</span>
               {a.category !== cat.path && <span className="max-w-40 shrink-0 truncate text-[11px] text-muted">{a.category?.split(" > ").at(-1)}</span>}
-              <Badge tone={a.status === "approved" ? "green" : a.status === "new" ? "blue" : a.status === "changed" ? "amber" : "red"}>{a.status}</Badge>
+              <SnStateBadge status={a.status} />
             </Link>
           ))}
         </div>
