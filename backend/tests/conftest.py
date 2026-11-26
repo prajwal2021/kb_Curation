@@ -46,6 +46,6 @@ def api_client(env):
     from app.users import current_user
 
     app.dependency_overrides[get_db] = lambda: env[0]
-    app.dependency_overrides[current_user] = lambda: User(id=1, name="Pat", password_hash="x")
+    app.dependency_overrides[current_user] = lambda: User(id=1, name="Pat", password_hash="x", is_admin=True)
     yield TestClient(app)
     app.dependency_overrides.clear()

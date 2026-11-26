@@ -123,7 +123,7 @@ def test_login_sets_httponly_cookie_and_stores_only_the_hash(jane: User) -> None
 def test_valid_session_gives_me(jane: User) -> None:
     s = LoginSession(token_hash=token_hash("tok"), user_id=1, expires_at=now() + timedelta(days=1))
     r = client_with(FakeDB(user=jane, session=s), "tok").get("/api/me")
-    assert r.status_code == 200 and r.json() == {"name": "Jane Doe"}
+    assert r.status_code == 200 and r.json() == {"id": 1, "name": "Jane Doe", "is_admin": False}
 
 
 def test_expired_session_is_refused_and_removed(jane: User) -> None:

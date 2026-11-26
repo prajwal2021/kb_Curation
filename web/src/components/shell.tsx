@@ -1,5 +1,5 @@
 "use client";
-import { BookOpenCheck, Check, ChevronDown, ChevronsUpDown, Globe, History, Info, ListChecks, LogOut, Plus, Settings, UserRound } from "lucide-react";
+import { BookOpenCheck, Check, ChevronDown, ChevronsUpDown, Globe, History, Info, ListChecks, LogOut, Plus, Settings, UserRound, Users } from "lucide-react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -50,7 +50,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [adding, setAdding] = useState(false);
   const [meOpen, setMeOpen] = useState(false);
   const meMenu = useRef<HTMLDivElement>(null);
-  const { data: me } = useApi<{ name: string }>("/api/me");
+  const { data: me } = useApi<{ name: string; is_admin: boolean }>("/api/me");
   const menu = useRef<HTMLDivElement>(null);
   const current = bots?.find((b) => b.key === bot);
 
@@ -93,10 +93,12 @@ export function Shell({ children }: { children: ReactNode }) {
                   {b.key === bot && <Check className="size-3.5" />}
                 </button>
               ))}
-              <div className="my-1 border-t border-line" />
-              <button onClick={() => { setOpen(false); setAdding(true); }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-neutral-600 hover:bg-neutral-100">
-                <Plus className="size-3.5" /> New chatbot
-              </button>
+              {me?.is_admin && <>
+                <div className="my-1 border-t border-line" />
+                <button onClick={() => { setOpen(false); setAdding(true); }} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-neutral-600 hover:bg-neutral-100">
+                  <Plus className="size-3.5" /> New chatbot
+                </button>
+              </>}
             </div>
           )}
         </div>
@@ -119,6 +121,11 @@ export function Shell({ children }: { children: ReactNode }) {
               })}
             </div>
           ))}
+          {me?.is_admin && (
+            <Link href={`/${bot}/users`} className={cn("mb-0.5 flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors", path.startsWith(`/${bot}/users`) ? "bg-neutral-200/70 text-ink" : "text-neutral-600 hover:bg-neutral-200/40 hover:text-ink")}>
+              <Users className="size-4" strokeWidth={1.8} /> Users
+            </Link>
+          )}
         </nav>
 
         <Link href={`/${bot}/servicenow/how-it-works`} className={cn("mx-3 mb-2 flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium", path.endsWith("/how-it-works") ? "bg-neutral-200/70 text-ink" : "text-neutral-500 hover:bg-neutral-200/40 hover:text-ink")}>

@@ -242,6 +242,8 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(80), unique=True)
     password_hash: Mapped[str] = mapped_column(String(200))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)   # opens every KB and manages users
+    kb_ids: Mapped[list] = mapped_column(JSONB, default=list)        # chatbot ids a non-admin may open
     created_at: Mapped[datetime] = mapped_column(TS, default=now)
 
 

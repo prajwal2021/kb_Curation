@@ -21,7 +21,8 @@ from .diffing import line_diff
 from .pipeline import record
 from .models import (Activity, Category, Chatbot, Comment, CrawlRun, Entry, EntryEvent, KbVersion, LoginSession, Page, PageEvent,
                      ScopeTopic, SnArticle, Source, User, now)
-from .users import MIN_PASSWORD, actor, current_user, find_user, hash_password, token_hash, verify_password
+from .users import (MIN_PASSWORD, actor, add_user_columns, can_open, current_user, find_user, hash_password, owned,
+                    require_admin, token_hash, verify_password)
 
 QUEUE = ("new", "changed", "removal")
 
@@ -88,6 +89,7 @@ async def lifespan(_: FastAPI):
         con.exec_driver_sql("ALTER TABLE sn_articles ALTER COLUMN status TYPE VARCHAR(20)")
         con.exec_driver_sql("ALTER TABLE sn_articles ADD COLUMN IF NOT EXISTS p_stage VARCHAR(10)")
         con.exec_driver_sql("ALTER TABLE sn_articles ADD COLUMN IF NOT EXISTS app_changed BOOLEAN DEFAULT false")
+        add_user_columns(con)
     seed()
     # Previous architecture, hidden for now: the website crawler and its schedule (it can call OpenAI on every run).
     # pipeline.start_background()
@@ -148,7 +150,7 @@ def logout(response: Response, kb_session: str | None = Cookie(default=None), db
 
 @api.get("/api/me")
 def me(user: User = Depends(current_user)):
-    return {"name": user.name}
+    return {"id": user.id, "name": user.name, "is_admin": bool(user.is_admin)}
 
 
 @api.post("/api/me/password")
@@ -166,9 +168,9 @@ def change_password(b: PasswordIn, user: User = Depends(current_user), kb_sessio
     return {"ok": True}
 
 
-def get_bot(key: str, db: Session = Depends(get_db)) -> Chatbot:
+def get_bot(key: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> Chatbot:
     bot = db.scalar(select(Chatbot).where(Chatbot.key == key))
-    if not bot:
+    if not bot or not can_open(user, bot.id):
         raise HTTPException(404, "Chatbot not found")
     return bot
 
@@ -232,17 +234,19 @@ class ChatbotIn(BaseModel):
 
 
 @api.get("/api/chatbots")
-def chatbots(db: Session = Depends(get_db)):
+def chatbots(user: User = Depends(current_user), db: Session = Depends(get_db)):
     out = []
     for b in db.scalars(select(Chatbot).order_by(Chatbot.id)):
+        if not can_open(user, b.id):
+            continue
         waiting = db.scalar(select(func.count()).select_from(Entry).where(Entry.chatbot_id == b.id, Entry.status.in_(QUEUE)))
         sn_waiting = db.scalar(select(func.count()).select_from(SnArticle).where(SnArticle.chatbot_id == b.id, servicenow.todo_clause()))
-        out.append({"key": b.key, "name": b.name, "description": b.description, "waiting": waiting, "sn_waiting": sn_waiting})
+        out.append({"id": b.id, "key": b.key, "name": b.name, "description": b.description, "waiting": waiting, "sn_waiting": sn_waiting})
     return out
 
 
 @api.post("/api/chatbots")
-def add_chatbot(b: ChatbotIn, db: Session = Depends(get_db)):
+def add_chatbot(b: ChatbotIn, _: User = Depends(require_admin), db: Session = Depends(get_db)):
     key = re.sub(r"[^a-z0-9]+", "-", b.name.lower()).strip("-")[:40]
     if not key:
         raise HTTPException(400, "Give the chatbot a name.")
@@ -322,8 +326,8 @@ def add_source(b: SourceIn, bot: Chatbot = Depends(get_bot), who: str = Depends(
 
 
 @api.patch("/api/sources/{sid}")
-def update_source(sid: int, b: SourceIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    s = db.get(Source, sid)
+def update_source(sid: int, b: SourceIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    s = owned(db, Source, sid, user)
     if not s:
         raise HTTPException(404)
     if b.label is not None:
@@ -348,8 +352,8 @@ def update_source(sid: int, b: SourceIn, who: str = Depends(actor), db: Session 
 
 
 @api.delete("/api/sources/{sid}")
-def delete_source(sid: int, who: str = Depends(actor), db: Session = Depends(get_db)):
-    s = db.get(Source, sid)
+def delete_source(sid: int, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    s = owned(db, Source, sid, user)
     if s:
         record(db, s.chatbot_id, "pages", "source_removed", who, f"Removed the source {s.url}")
         db.delete(s)
@@ -477,8 +481,8 @@ def event_dict(ev: PageEvent, p: Page, diff: bool = False) -> dict:
 
 
 @api.get("/api/pages/{pid}")
-def page_detail(pid: int, db: Session = Depends(get_db)):
-    p = db.get(Page, pid)
+def page_detail(pid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = owned(db, Page, pid, user)
     if not p:
         raise HTTPException(404)
     events = db.scalars(select(PageEvent).where(PageEvent.page_id == pid).order_by(PageEvent.id.desc()).limit(30)).all()
@@ -500,8 +504,8 @@ def changes(run_id: int | None = None, bot: Chatbot = Depends(get_bot), db: Sess
 
 
 @api.get("/api/events/{eid}")
-def event_detail(eid: int, db: Session = Depends(get_db)):
-    ev = db.get(PageEvent, eid)
+def event_detail(eid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    ev = owned(db, PageEvent, eid, user)
     if not ev:
         raise HTTPException(404)
     return event_dict(ev, db.get(Page, ev.page_id), diff=True)
@@ -556,8 +560,8 @@ def add_category(b: CategoryIn, bot: Chatbot = Depends(get_bot), who: str = Depe
 
 
 @api.patch("/api/categories/{cid}")
-def update_category(cid: int, b: CategoryIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    c = db.get(Category, cid)
+def update_category(cid: int, b: CategoryIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    c = owned(db, Category, cid, user)
     if not c:
         raise HTTPException(404)
     record(db, c.chatbot_id, "settings", "category_edited", who,
@@ -577,8 +581,8 @@ def update_category(cid: int, b: CategoryIn, who: str = Depends(actor), db: Sess
 
 
 @api.delete("/api/categories/{cid}")
-def delete_category(cid: int, who: str = Depends(actor), db: Session = Depends(get_db)):
-    c = db.get(Category, cid)
+def delete_category(cid: int, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    c = owned(db, Category, cid, user)
     if not c:
         return {"ok": True}
     used = db.scalar(select(func.count()).select_from(Entry).where(
@@ -653,8 +657,8 @@ def review_summary(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db
                           Entry.scope_score < (bot.scope_threshold or scope.DEFAULT_THRESHOLD) - scope.CLEAR_MARGIN)) or 0}}
 
 
-def _entry(db: Session, eid: int) -> Entry:
-    e = db.get(Entry, eid)
+def _entry(db: Session, eid: int, user: User) -> Entry:
+    e = owned(db, Entry, eid, user)
     if not e:
         raise HTTPException(404, "Entry not found")
     return e
@@ -677,8 +681,8 @@ def _detail(db: Session, e: Entry) -> dict:
 
 
 @api.get("/api/entries/{eid}")
-def entry_detail(eid: int, db: Session = Depends(get_db)):
-    return _detail(db, _entry(db, eid))
+def entry_detail(eid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _detail(db, _entry(db, eid, user))
 
 
 class EntryIn(BaseModel):
@@ -690,8 +694,8 @@ class EntryIn(BaseModel):
 
 
 @api.patch("/api/entries/{eid}")
-def edit_entry(eid: int, b: EntryIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    e = _entry(db, eid)
+def edit_entry(eid: int, b: EntryIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    e = _entry(db, eid, user)
     guard(review.edit, db, e, who, **b.model_dump())
     changed = [k for k, v in b.model_dump().items() if v is not None]
     record(db, e.chatbot_id, "review", "edited", who, f"Edited “{shown(e)['title']}” ({', '.join(changed).replace('_ids', '').replace('_id', '')})", entry_id=e.id)
@@ -704,8 +708,8 @@ class NoteIn(BaseModel):
 
 
 @api.post("/api/entries/{eid}/{action}")
-def act(eid: int, action: str, b: NoteIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    e = _entry(db, eid)
+def act(eid: int, action: str, b: NoteIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    e = _entry(db, eid, user)
     was, name = e.status, shown(e)["title"]
     verbs = {"approve": {"removal": "Approved removing"}.get(was, "Approved the change to" if was == "changed" else "Approved"),
              "reject": {"removal": "Kept (rejected the removal of)", "changed": "Rejected the change to"}.get(was, "Rejected"),
@@ -790,8 +794,8 @@ def get_scope(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
 
 
 @api.get("/api/scope-topics/{tid}")
-def scope_topic(tid: int, db: Session = Depends(get_db)):
-    t = db.get(ScopeTopic, tid)
+def scope_topic(tid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    t = owned(db, ScopeTopic, tid, user)
     if not t:
         raise HTTPException(404)
     return {"id": t.id, "name": t.name, "group": t.group, "words": t.words, "text": t.text[:20000], "truncated": len(t.text) > 20000}
@@ -949,6 +953,85 @@ def sync_document(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)
     if bot.gdoc_error:
         raise HTTPException(400, bot.gdoc_error)
     return doc_dict(bot, db)
+
+
+# ── users (admin) ─────────────────────────────────────────────────────────────
+# Admins add users with a starting password; users change it themselves in Settings. A forgotten password means
+# delete and add again (History stores names as text, so it stays linked).
+
+class NewUserIn(BaseModel):
+    name: str
+    password: str
+    is_admin: bool = False
+    kb_ids: list[int] = []
+
+
+class UserIn(BaseModel):
+    is_admin: bool | None = None
+    kb_ids: list[int] | None = None
+
+
+def user_dict(u: User) -> dict:
+    return {"id": u.id, "name": u.name, "is_admin": bool(u.is_admin), "kb_ids": u.kb_ids or [], "created_at": u.created_at}
+
+
+def _kb_ids(db: Session, ids: list[int]) -> list[int]:
+    """The ids without repeats, or 400 if one isn't a real chatbot."""
+    ids = list(dict.fromkeys(ids))
+    if len(ids) != db.scalar(select(func.count()).select_from(Chatbot).where(Chatbot.id.in_(ids))):
+        raise HTTPException(400, "Unknown knowledge base.")
+    return ids
+
+
+def _user(db: Session, uid: int) -> User:
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "User not found")
+    return u
+
+
+@api.get("/api/admin/users")
+def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return [user_dict(u) for u in db.scalars(select(User).order_by(func.lower(User.name)))]
+
+
+@api.post("/api/admin/users")
+def create_user(b: NewUserIn, _: User = Depends(require_admin), db: Session = Depends(get_db)):
+    name = b.name.strip()
+    if not name or len(name) > 80:
+        raise HTTPException(400, "Name must be 1 to 80 characters.")
+    if find_user(db, name):
+        raise HTTPException(400, "A user with that name already exists.")
+    if len(b.password) < MIN_PASSWORD:
+        raise HTTPException(400, f"Password must be at least {MIN_PASSWORD} characters.")
+    u = User(name=name, password_hash=hash_password(b.password), is_admin=b.is_admin, kb_ids=_kb_ids(db, b.kb_ids))
+    db.add(u)
+    db.commit()
+    return user_dict(u)
+
+
+@api.patch("/api/admin/users/{uid}")
+def update_user(uid: int, b: UserIn, me: User = Depends(require_admin), db: Session = Depends(get_db)):
+    u = _user(db, uid)
+    if b.is_admin is False and u.id == me.id:
+        raise HTTPException(400, "You can't remove your own admin access.")
+    if b.is_admin is not None:
+        u.is_admin = b.is_admin
+    if b.kb_ids is not None:
+        u.kb_ids = _kb_ids(db, b.kb_ids)
+    db.commit()
+    return user_dict(u)
+
+
+@api.delete("/api/admin/users/{uid}")
+def delete_user(uid: int, me: User = Depends(require_admin), db: Session = Depends(get_db)):
+    u = _user(db, uid)
+    if u.id == me.id:
+        raise HTTPException(400, "You can't delete yourself.")
+    db.execute(delete(LoginSession).where(LoginSession.user_id == u.id))  # signed out everywhere
+    db.delete(u)
+    db.commit()
+    return {"ok": True}
 
 
 app.include_router(api)  # last, after every @api route is defined

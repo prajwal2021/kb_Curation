@@ -1,6 +1,6 @@
 """Reviewer accounts: password hashing and the command that creates them.
 
-    python -m app.users add "Jane Doe"     # asks for the password; on an existing name, resets it
+    python -m app.users add "Jane Doe"     # asks for the password; makes an admin; on an existing name, resets it
 """
 from __future__ import annotations
 
@@ -42,6 +42,14 @@ def verify_password(pw: str, stored: str) -> bool:
     return hmac.compare_digest(h, bytes.fromhex(hash_hex))  # same time whether close or not
 
 
+def add_user_columns(con) -> None:
+    """Add the role columns to a users table made before roles existed. Safe to run on every start."""
+    # DEFAULT true first, so every user from before roles becomes an admin exactly once; new rows then get false
+    con.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT true")
+    con.exec_driver_sql("ALTER TABLE users ALTER COLUMN is_admin SET DEFAULT false")
+    con.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS kb_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
+
+
 def token_hash(token: str) -> str:
     """The session token as stored in the database (sha256 hex): the raw token only ever lives in the cookie."""
     return hashlib.sha256(token.encode()).hexdigest()
@@ -65,6 +73,24 @@ def current_user(kb_session: str | None = Cookie(default=None), db: Session = De
     return user
 
 
+def can_open(user: User, chatbot_id: int) -> bool:
+    """True if the user may see and change this KB. Routes answer a KB or item they can't open as if it didn't exist."""
+    return bool(user.is_admin) or chatbot_id in (user.kb_ids or [])
+
+
+def require_admin(user: User = Depends(current_user)) -> User:
+    """The signed-in user, if they are an admin. 403 otherwise."""
+    if not user.is_admin:
+        raise HTTPException(403, "Admins only")
+    return user
+
+
+def owned(db: Session, model, row_id: int, user: User):
+    """The row, or None when it is missing or in a KB the user can't open: callers answer both the same way."""
+    row = db.get(model, row_id)
+    return row if row and can_open(user, row.chatbot_id) else None
+
+
 def actor(user: User = Depends(current_user)) -> str:
     """Who did it, for History: the signed-in name (FastAPI runs current_user once per request)."""
     return user.name
@@ -84,15 +110,18 @@ def add_user(name: str) -> None:
         sys.exit("Passwords don't match.")
 
     Base.metadata.create_all(engine, tables=[User.__table__, LoginSession.__table__])  # works before the API first starts
+    with engine.begin() as con:
+        add_user_columns(con)
     with SessionLocal() as db:
         user = find_user(db, name)
         if user:
             user.password_hash = hash_password(pw)
+            user.is_admin = True  # the CLI is the way back in after a lockout
             db.execute(delete(LoginSession).where(LoginSession.user_id == user.id))  # signed out everywhere
-            msg = f"Password reset for {user.name}"
+            msg = f"Password reset for {user.name} (admin)"
         else:
-            db.add(User(name=name, password_hash=hash_password(pw)))
-            msg = f"Added {name}"
+            db.add(User(name=name, password_hash=hash_password(pw), is_admin=True))
+            msg = f"Added {name} (admin)"
         db.commit()
     print(msg)
 

@@ -15,8 +15,8 @@ from . import docgen, servicenow as sn, sn_ai
 from .config import DATA_DIR, PUBLIC_API_BASE, SN_IMPORT_TOKEN, SN_MODEL
 from .db import get_db
 from .diffing import line_diff, word_diff
-from .models import Activity, Chatbot, SnArticle, SnArticleEvent, SnAsset, SnCategory, SnLink, SnLinkEvent, SnVersion, now
-from .users import actor, current_user
+from .models import Activity, Chatbot, SnArticle, SnArticleEvent, SnAsset, SnCategory, SnLink, SnLinkEvent, SnVersion, User, now
+from .users import actor, can_open, current_user, owned
 
 router = APIRouter(dependencies=[Depends(current_user)])   # every ServiceNow screen needs a signed-in reviewer
 public = APIRouter()   # image files linked from published exports, and the import guarded by its own token
@@ -24,9 +24,9 @@ ASSETS = DATA_DIR / "servicenow" / "assets"
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp", "image/svg+xml", "image/tiff", "image/x-icon"}
 
 
-def get_bot(key: str, db: Session = Depends(get_db)) -> Chatbot:
+def get_bot(key: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> Chatbot:
     bot = db.scalar(select(Chatbot).where(Chatbot.key == key))
-    if not bot:
+    if not bot or not can_open(user, bot.id):
         raise HTTPException(404, "Chatbot not found")
     return bot
 
@@ -147,16 +147,16 @@ def add_link(b: LinkIn, bot: Chatbot = Depends(get_bot), who: str = Depends(acto
     return link_dict(l, cat_map(db, bot.id), sn.busy_links())
 
 
-def _link(db: Session, lid: int) -> SnLink:
-    l = db.get(SnLink, lid)
+def _link(db: Session, lid: int, user: User) -> SnLink:
+    l = owned(db, SnLink, lid, user)
     if not l:
         raise HTTPException(404, "Link not found")
     return l
 
 
 @router.patch("/api/servicenow/links/{lid}")
-def update_link(lid: int, b: LinkIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    l = _link(db, lid)
+def update_link(lid: int, b: LinkIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    l = _link(db, lid, user)
     if b.label is not None:
         l.label = b.label.strip()[:120]
     if b.set_schedule:
@@ -170,8 +170,8 @@ def update_link(lid: int, b: LinkIn, who: str = Depends(actor), db: Session = De
 
 
 @router.delete("/api/servicenow/links/{lid}")
-def delete_link(lid: int, who: str = Depends(actor), db: Session = Depends(get_db)):
-    l = db.get(SnLink, lid)
+def delete_link(lid: int, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    l = owned(db, SnLink, lid, user)
     if l:
         sn.record(db, l.chatbot_id, "link_removed", who, f"Removed the link {l.url}")
         heir = next((x for x in sn.siblings(db, l) if x.id != l.id), None)
@@ -188,8 +188,8 @@ class CheckIn(BaseModel):
 
 
 @router.post("/api/servicenow/links/{lid}/check")
-def check(lid: int, b: CheckIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    l = _link(db, lid)
+def check(lid: int, b: CheckIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    l = _link(db, lid, user)
     if b.audit and not sn_ai.enabled():
         raise HTTPException(400, "AI is off: add OPENAI_API_KEY to backend/.env.")
     if not sn.enqueue(l.id, "manual", who, b.audit):
@@ -220,8 +220,8 @@ def events(limit: int = 100, include_baseline: bool = False, bot: Chatbot = Depe
 
 
 @router.get("/api/servicenow/events/{eid}")
-def event_detail(eid: int, db: Session = Depends(get_db)):
-    e = db.get(SnLinkEvent, eid)
+def event_detail(eid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    e = owned(db, SnLinkEvent, eid, user)
     if not e:
         raise HTTPException(404, "Not found")
     return event_dict(e, db.get(SnLink, e.link_id), cat_map(db, e.chatbot_id), full=True)
@@ -276,8 +276,8 @@ def flags(bot: Chatbot = Depends(get_bot), db: Session = Depends(get_db)):
     return sn.flag_list(db, bot)
 
 
-def _article(db: Session, aid: int) -> SnArticle:
-    a = db.get(SnArticle, aid)
+def _article(db: Session, aid: int, user: User) -> SnArticle:
+    a = owned(db, SnArticle, aid, user)
     if not a:
         raise HTTPException(404, "Article not found")
     return a
@@ -323,8 +323,8 @@ def _detail(db: Session, a: SnArticle) -> dict:
 
 
 @router.get("/api/servicenow/articles/{aid}")
-def article_detail(aid: int, db: Session = Depends(get_db)):
-    return _detail(db, _article(db, aid))
+def article_detail(aid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _detail(db, _article(db, aid, user))
 
 
 class ArticleIn(BaseModel):
@@ -335,8 +335,8 @@ class ArticleIn(BaseModel):
 
 
 @router.patch("/api/servicenow/articles/{aid}")
-def edit_article(aid: int, b: ArticleIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    a = _article(db, aid)
+def edit_article(aid: int, b: ArticleIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    a = _article(db, aid, user)
     if (b.title, b.content, b.category_id) != (None, None, None):
         guard(sn.edit, db, a, who, title=b.title, content=b.content, category_id=b.category_id)
     if b.flags is not None:
@@ -371,8 +371,8 @@ VERBS = {"send_for_review": "Sent for review", "publish": "Published", "send_bac
 
 
 @router.post("/api/servicenow/articles/{aid}/{action}")
-def act(aid: int, action: str, b: NoteIn, who: str = Depends(actor), db: Session = Depends(get_db)):
-    a = _article(db, aid)
+def act(aid: int, action: str, b: NoteIn, user: User = Depends(current_user), who: str = Depends(actor), db: Session = Depends(get_db)):
+    a = _article(db, aid, user)
     fn = sn.ACTIONS.get(action)
     if not fn:
         raise HTTPException(404)
@@ -511,7 +511,9 @@ def import_auth(x_import_token: str | None = Header(default=None)) -> None:
 
 @public.post("/api/servicenow/import/{key}", dependencies=[Depends(import_auth)])
 async def import_kb(request: Request, key: str, db: Session = Depends(get_db)):
-    bot = get_bot(key, db)
+    bot = db.scalar(select(Chatbot).where(Chatbot.key == key))  # the token, not a user, grants access: no get_bot
+    if not bot:
+        raise HTTPException(404, "Chatbot not found")
     kb = json.loads(await request.body())
     if not isinstance(kb, dict) or not isinstance(kb.get("articles"), list):
         raise HTTPException(400, "Expected {categories: [...], articles: [...]}")
