@@ -1,0 +1,97 @@
+{
+ "fps": 30,
+ "total": 115.575,
+ "scenes": [
+  {
+   "id": "intro",
+   "audio": "intro.mp3",
+   "from": 0.0,
+   "dur": 12.299,
+   "cues": {
+    "sn": 9.521,
+    "bot": 10.218,
+    "person": 5.724
+   }
+  },
+  {
+   "id": "import",
+   "audio": "import.mp3",
+   "from": 12.299,
+   "dur": 22.377,
+   "cues": {
+    "tabs": 5.55,
+    "internal": 15.976,
+    "out": 19.517
+   }
+  },
+  {
+   "id": "webpages",
+   "audio": "webpages.mp3",
+   "from": 34.676,
+   "dur": 16.432,
+   "cues": {
+    "chips": 2.044,
+    "ok": 6.618,
+    "ai": 9.347
+   }
+  },
+  {
+   "id": "todo",
+   "audio": "todo.mp3",
+   "from": 51.108,
+   "dur": 10.163,
+   "cues": {
+    "badge": 2.091,
+    "row": 3.426
+   }
+  },
+  {
+   "id": "article",
+   "audio": "article.mp3",
+   "from": 61.271,
+   "dur": 18.011,
+   "cues": {
+    "reason": 1.754,
+    "diff": 5.156,
+    "click": 10.81,
+    "state": 15.651
+   }
+  },
+  {
+   "id": "release",
+   "audio": "release.mp3",
+   "from": 79.282,
+   "dur": 19.915,
+   "cues": {
+    "next": 4.238,
+    "click": 5.887,
+    "history": 9.451,
+    "filter": 12.179
+   }
+  },
+  {
+   "id": "history",
+   "audio": "history.mp3",
+   "from": 99.197,
+   "dur": 8.491,
+   "cues": {
+    "list": 3.217,
+    "users": 4.923
+   }
+  },
+  {
+   "id": "outro",
+   "audio": "outro.mp3",
+   "from": 107.688,
+   "dur": 7.887,
+   "cues": {
+    "s0": 0.546,
+    "s1": 1.545,
+    "s2": 2.311,
+    "s3": 3.53,
+    "s4": 4.552,
+    "end": 5.574
+   }
+  }
+ ]
+}
