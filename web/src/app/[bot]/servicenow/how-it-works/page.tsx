@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useRef, useState, type ReactNode } from "react";
+import { Play, X } from "lucide-react";
 import { useApi } from "@/lib/api";
 import type { SnOverview, SnState } from "@/lib/sn";
 import { useBot } from "@/components/shell";
@@ -17,6 +18,48 @@ const LIFE: { s: SnState; d: string; moves: string[]; by: string }[] = [
   { s: "pending_retirement", d: "Someone, or the AI, thinks it's out of date. Still published until a reviewer decides.", moves: ["Retire →", "← Keep published"], by: "A reviewer" },
   { s: "retired", d: "Out of use. Kept, and still in releases, labeled Retired.", moves: ["Restore (back to draft)"], by: "A reviewer" },
 ];
+
+// A narrated two-minute tour (with captions). Files live in web/public/how-it-works.
+const TOUR = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/how-it-works`;
+
+function VideoTour() {
+  const [open, setOpen] = useState(false);
+  const video = useRef<HTMLVideoElement>(null);
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)}
+        className="group mb-5 flex w-full items-center gap-4 rounded-2xl border border-line bg-white p-2.5 pr-5 text-left transition hover:border-neutral-300 hover:shadow-sm">
+        <span className="relative block aspect-video w-44 shrink-0 overflow-hidden rounded-xl bg-neutral-100">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={`${TOUR}/tour-poster.jpg`} alt="" className="size-full object-cover" />
+          <span className="absolute inset-0 flex items-center justify-center bg-black/10 transition group-hover:bg-black/20">
+            <span className="flex size-10 items-center justify-center rounded-full bg-white/95 shadow"><Play className="ml-0.5 size-4 fill-ink text-ink" /></span>
+          </span>
+        </span>
+        <span className="min-w-0">
+          <span className="block text-sm font-semibold text-ink">Watch the 2-minute tour</span>
+          <span className="mt-0.5 block text-[13px] text-muted">From ServiceNow to the chatbot: web pages, AI suggestions, review and release. Narrated, with captions.</span>
+        </span>
+        <span className="ml-auto hidden shrink-0 text-xs font-medium text-ink sm:block">Play ▸</span>
+      </button>
+    );
+  }
+  return (
+    <div className="mb-5 overflow-hidden rounded-2xl border border-line bg-black">
+      <video ref={video} controls autoPlay playsInline preload="auto" poster={`${TOUR}/tour-poster.jpg`} className="aspect-video w-full"
+        onLoadedMetadata={() => { const t = video.current?.textTracks[0]; if (t) t.mode = "showing"; }}>
+        <source src={`${TOUR}/tour.mp4`} type="video/mp4" />
+        <track kind="captions" src={`${TOUR}/tour.vtt`} srcLang="en" label="English" default />
+      </video>
+      <div className="flex items-center justify-between bg-white px-4 py-2 text-xs text-muted">
+        <span>How KB Curation works · 2 min · captions on (turn them off in the player)</span>
+        <button type="button" onClick={() => setOpen(false)} className="flex items-center gap-1 rounded-md px-2 py-1 font-medium text-ink hover:bg-neutral-100">
+          <X className="size-3.5" /> Close
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function SnHowItWorksPage() {
   const bot = useBot();
@@ -48,6 +91,7 @@ export default function SnHowItWorksPage() {
   return (
     <Page>
       <PageHeader title="How it works" description={tab === "big" ? "How an answer gets from ServiceNow to the chatbot, and where a person steps in." : "The same states as ServiceNow. Every article is in exactly one."} />
+      <VideoTour />
       <Tabs className="mb-5" value={tab} onChange={setTab} items={[{ value: "big", label: "The big picture" }, { value: "life", label: "An article's life" }]} />
       {o.error && <ErrorNote>{o.error}</ErrorNote>}
       {tab === "big" ? (!d ? (!o.error && <Loading />) : (

@@ -1,0 +1,122 @@
+{
+ "kb.tabs": {
+  "x": 276,
+  "y": 161,
+  "width": 548.359375,
+  "height": 36
+ },
+ "kb.internal": {
+  "x": 912.40625,
+  "y": 756.5,
+  "width": 87.03125,
+  "height": 22
+ },
+ "kb.tree": {
+  "x": 276,
+  "y": 217,
+  "width": 1292,
+  "height": 6590
+ },
+ "wp.ok": {
+  "x": 394,
+  "y": 113,
+  "width": 1056,
+  "height": 45.5
+ },
+ "wp.row": {
+  "x": 394,
+  "y": 222.5,
+  "width": 1056,
+  "height": 2682
+ },
+ "wp.chips": {
+  "x": 411,
+  "y": 277,
+  "width": 978,
+  "height": 22
+ },
+ "todo.row": {
+  "x": 395,
+  "y": 426,
+  "width": 1054,
+  "height": 64.5
+ },
+ "todo.badge": {
+  "x": 48,
+  "y": 136.25,
+  "width": 129.609375,
+  "height": 19.5
+ },
+ "art.reason": {
+  "x": 276,
+  "y": 143,
+  "width": 988,
+  "height": 91
+ },
+ "art.diff": {
+  "x": 541.5,
+  "y": 552.5,
+  "width": 54.484375,
+  "height": 17
+ },
+ "art.state": {
+  "x": 1309,
+  "y": 88.5,
+  "width": 238,
+  "height": 42
+ },
+ "art.publish": {
+  "x": 1166.90625,
+  "y": 722.25,
+  "width": 97.09375,
+  "height": 36
+ },
+ "art.sendback": {
+  "x": 841.703125,
+  "y": 722.25,
+  "width": 172.796875,
+  "height": 36
+ },
+ "art.state2": {
+  "x": 1309,
+  "y": 88.5,
+  "width": 238,
+  "height": 42
+ },
+ "rel.next": {
+  "x": 1130,
+  "y": 113,
+  "width": 320,
+  "height": 413
+ },
+ "rel.button": {
+  "x": 1151,
+  "y": 443,
+  "width": 278,
+  "height": 36
+ },
+ "rel.changes": {
+  "x": 423,
+  "y": 296.015625,
+  "width": 682,
+  "height": 22.625
+ },
+ "rel.history": {
+  "x": 394,
+  "y": 497,
+  "width": 712,
+  "height": 133
+ },
+ "hist.list": {
+  "x": 394,
+  "y": 193,
+  "width": 1056,
+  "height": 65.5
+ },
+ "users.table": {
+  "x": 395,
+  "y": 134,
+  "width": 1054,
+  "height": 127.5
+ }
+}

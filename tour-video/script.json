@@ -1,0 +1,10 @@
+[
+ {"id":"intro","text":"This is KB Curation. It keeps the answers our chatbots give accurate, and makes sure a person approves every one of them. Here's how an answer gets from ServiceNow to the chatbot."},
+ {"id":"import","text":"It starts in ServiceNow. Every help article comes in with its category, its state, and its flags. The states are the same as ServiceNow's: draft, in review, published, pending retirement, and retired. Internal only marks articles meant for staff, not for students or parents."},
+ {"id":"webpages","text":"Next, each category is linked to the TTU web pages its articles are based on. Those pages are checked on a schedule. When one changes, the AI reads what changed, and suggests an update, a new article, or a retirement."},
+ {"id":"todo","text":"Everything that needs a person lands in To do: changes waiting for review, suggested retirements, and web pages that can't be read."},
+ {"id":"article","text":"Open an article to see why it was suggested, which web page it came from, and exactly what changed. The AI only suggests. Nothing changes until a person publishes it, or sends it back to draft. And editing a published article never takes it offline."},
+ {"id":"release","text":"Publishing doesn't reach the chatbot on its own. When you're ready, release a version: a numbered snapshot of the whole knowledge base, with every article labeled with its state and flags. The chatbot reads the latest release, and shows students and parents only published articles that aren't internal."},
+ {"id":"history","text":"Every decision, who made it and when, is kept in History. And admins choose who can open each knowledge base."},
+ {"id":"outro","text":"Import. Watch. Suggest. Review. Release. That's KB Curation."}
+]
